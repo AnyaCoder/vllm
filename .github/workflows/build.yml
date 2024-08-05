@@ -1,0 +1,183 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to trigger TE build on GitHub
+name: 'Build'
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag of xformers to build: (format: v0.0.27/v0.0.27.post1)'
+        default: 'v1.8.1'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version tag of xformers to build (format: v0.0.27/v0.0.27.post1)'
+        default: 'v1.8.1'
+        required: true
+        type: string
+
+env:
+  FORCE_CUDA: 1
+  MAX_JOBS: 1
+  DISTUTILS_USE_SDK: 1 # otherwise distutils will complain on windows about multiple versions of msvc
+  XFORMERS_BUILD_TYPE: "Release"
+
+
+
+jobs:
+
+  pytorch:
+    name: Build wheels for Python ${{ matrix.pyver }}, CUDA ${{ matrix.cuda }}, and Torch ${{ matrix.torchver }}, and arch ${{ matrix.arch }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        pyver: ["3.10"]
+        cuda: ["12.1.0"]
+        torchver: ["2.4.0.dev20240427"]
+        arch:
+          - "7.0 7.5 8.0 8.6 8.9 9.0+PTX"
+          
+    defaults:
+      run:
+        shell: pwsh
+    env:
+        CUDAVER: ${{ matrix.cuda }}
+        PCKGVER: ${{ inputs.version }}
+        TORCH_CUDA_ARCH_LIST: ${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+         submodules: 'recursive'
+         path: "."
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.pyver }}
+
+      - name: Setup Mamba
+        uses: conda-incubator/setup-miniconda@v2.2.0
+        with:
+          activate-environment: "build"
+          python-version: ${{ matrix.pyver }}
+          miniforge-variant: Mambaforge
+          miniforge-version: latest
+          use-mamba: true
+          add-pip-as-python-dependency: true
+          auto-activate-base: false
+
+      - name: Install Dependencies
+        run: |
+          $env:MAMBA_NO_LOW_SPEED_LIMIT = 1
+          $cudaVersion = '${{ matrix.cuda }}'
+          $cudaVersionPytorch = '${{ matrix.cuda }}'.Remove('${{ matrix.cuda }}'.LastIndexOf('.')).Replace('.','')
+          mamba install -y -c nvidia/label/cuda-$cudaVersion cuda-toolkit cuda-runtime
+          if (!(mamba list cuda)[-1].contains('cuda')) {sleep -s 10; mamba install -y 'cuda' $cudaVersion}
+          if (!(mamba list cuda)[-1].contains('cuda')) {throw 'CUDA Toolkit failed to install!'}
+          
+          python -m pip install nvidia-cudnn-cu12==8.9.7.29
+          $env:CUDA_PATH = "C:\Miniconda3\envs\build"
+          $env:PATH = "$env:CUDA_PATH\bin;$env:PATH"
+          
+          $sourceLibDir = "C:/Miniconda3/envs/build/Lib/site-packages/nvidia/cudnn/lib/x64/"
+          $targetLibDir = "$env:CUDA_PATH/lib/x64/"
+          
+          $sourceIncludeDir = "C:/Miniconda3/envs/build/Lib/site-packages/nvidia/cudnn/include/"
+          $targetIncludeDir = "$env:CUDA_PATH/include/"
+          
+          $sourceBinDir = "C:/Miniconda3/envs/build/Lib/site-packages/nvidia/cudnn/bin/"
+          $targetBinDir = "$env:CUDA_PATH/bin/"
+          
+          if (-not (Test-Path -Path $targetLibDir)) {
+              New-Item -ItemType Directory -Path $targetLibDir -Force
+          }
+          
+          if (-not (Test-Path -Path $targetIncludeDir)) {
+              New-Item -ItemType Directory -Path $targetIncludeDir -Force
+          }
+          
+          if (-not (Test-Path -Path $targetBinDir)) {
+              New-Item -ItemType Directory -Path $targetBinDir -Force
+          }
+          
+          Copy-Item -Path "$sourceLibDir*" -Destination $targetLibDir -Force
+          Copy-Item -Path "$sourceIncludeDir*" -Destination $targetIncludeDir -Force
+          Copy-Item -Path "$sourceBinDir*" -Destination $targetBinDir -Force
+          Write-Host "All .lib files have been copied to $targetLibDir"
+          Write-Host "All .h files have been copied to $targetIncludeDir"
+          Write-Host "All .dll files have been copied to $targetBinDir"
+          
+          git config --global --add safe.directory "*"
+          
+          python -m pip install huggingface_hub
+          huggingface-cli login --token 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
+          huggingface-cli download SpicyqSama007/windows_compile --repo-type dataset --local-dir .
+          
+          dir
+          ren "torch-2.4.0.dev20240427_cu121-cp310-cp310-win_amd64.whl" "torch-2.4.0.dev20240427+cu121-cp310-cp310-win_amd64.whl"
+          ren "torchaudio-2.2.0.dev20240427_cu121-cp310-cp310-win_amd64.whl" "torchaudio-2.2.0.dev20240427+cu121-cp310-cp310-win_amd64.whl"
+          ren "torchvision-0.19.0.dev20240428_cu121-cp310-cp310-win_amd64.whl" "torchvision-0.19.0.dev20240428+cu121-cp310-cp310-win_amd64.whl"
+          dir
+          
+          python -m pip install ".\torch-2.4.0.dev20240427+cu121-cp310-cp310-win_amd64.whl"
+          python -m pip install ".\torchaudio-2.2.0.dev20240427+cu121-cp310-cp310-win_amd64.whl"
+          python -m pip install ".\torchvision-0.19.0.dev20240428+cu121-cp310-cp310-win_amd64.whl"
+          python -m pip install ".\triton_windows-0.1.0-py3-none-any.whl"
+          python -m pip install -r requirements-cuda.txt
+          python -m pip install --upgrade build setuptools wheel packaging ninja psutil
+          
+      - name: Install VS2022 BuildTools 17.9.7
+        run: choco install -y visualstudio2022buildtools --version=117.9.7.0 --params "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --installChannelUri https://aka.ms/vs/17/release/180911598_-255012421/channel"
+        if: runner.os == 'Windows'
+
+      - name: Build Wheel
+        id: build-wheel
+        run: |
+          # --- Spawn the VS shell
+          if ($IsWindows) {
+            Import-Module 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+            Enter-VsDevShell -VsInstallPath 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools' -DevCmdArguments '-arch=x64 -host_arch=x64'
+            $env:DISTUTILS_USE_SDK=1
+          }
+          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
+          $packageVersion = $env:PCKGVER.TrimStart('v')
+          
+          $env:CUDA_PATH = $env:CONDA_PREFIX
+          $env:CUDA_HOME = $env:CONDA_PREFIX
+          $env:NVTE_FRAMEWORK = "pytorch"
+          $env:MAX_JOBS = '1'
+          $env:FLASH_ATTENTION_FORCE_BUILD = 'TRUE'
+          $env:FLASH_ATTENTION_FORCE_CXX11_ABI = 'FALSE'
+          $env:BUILD_TARGET = "cuda"
+          $env:CUDNN_PATH = "C:\Miniconda3\envs\build\lib\site-packages\nvidia\cudnn"
+
+          Copy-Item -Path "$sourceLibDir*" -Destination $targetLibDir -Force
+          Copy-Item -Path "$targetLibDir*" -Destination "$targetLibDir../" -Force
+          Copy-Item -Path "$sourceIncludeDir*" -Destination $targetIncludeDir -Force
+          Copy-Item -Path "$sourceBinDir*" -Destination $targetBinDir -Force
+          Write-Host "All .lib files have been copied to $targetLibDir"
+          Write-Host "All .h files have been copied to $targetIncludeDir"
+          Write-Host "All .dll files have been copied to $targetBinDir"
+          
+          python setup.py bdist_wheel --dist-dir=dist
+          
+      - uses: actions/upload-artifact@v3
+        with:
+          name: 'windows-wheels'
+          path: ./dist/*.whl
+
+      - name: Upload files to a GitHub release
+        uses: svenstaro/upload-release-action@2.6.1
+        continue-on-error: true
+        with:
+          file: ./dist/*.whl
+          tag: ${{ inputs.version }}
+          file_glob: true
+          overwrite: true
+          release_name: ${{ inputs.version }}
