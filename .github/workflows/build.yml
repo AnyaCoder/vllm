@@ -156,14 +156,6 @@ jobs:
           $env:FLASH_ATTENTION_FORCE_CXX11_ABI = 'FALSE'
           $env:BUILD_TARGET = "cuda"
           $env:CUDNN_PATH = "C:\Miniconda3\envs\build\lib\site-packages\nvidia\cudnn"
-
-          Copy-Item -Path "$sourceLibDir*" -Destination $targetLibDir -Force
-          Copy-Item -Path "$targetLibDir*" -Destination "$targetLibDir../" -Force
-          Copy-Item -Path "$sourceIncludeDir*" -Destination $targetIncludeDir -Force
-          Copy-Item -Path "$sourceBinDir*" -Destination $targetBinDir -Force
-          Write-Host "All .lib files have been copied to $targetLibDir"
-          Write-Host "All .h files have been copied to $targetIncludeDir"
-          Write-Host "All .dll files have been copied to $targetBinDir"
           
           python setup.py bdist_wheel --dist-dir=dist
           
